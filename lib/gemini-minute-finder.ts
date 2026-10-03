@@ -1174,7 +1174,7 @@ async function laneWorker(
       } else if (e.kind === 'rpd' || e.kind === 'rate') {
         const googleDelayMs = extractGoogleRetryDelayMs(err) ?? e.retryDelayMs
         const used = getModelUsage(lane.model.id, lane.apiKey)
-        const hasShortRetry = typeof googleDelayMs === 'number' && googleDelayMs > 0 && googleDelayMs <= 300_000
+        const hasShortRetry = typeof googleDelayMs === 'number' && googleDelayMs > 0 && googleDelayMs <= 120_000
 
         // Only mark dead if genuinely exhausted without a short retry delay from Google
         if (e.kind === 'rpd' && used >= lane.model.rpd && !hasShortRetry) {

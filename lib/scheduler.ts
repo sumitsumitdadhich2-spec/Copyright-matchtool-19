@@ -1631,12 +1631,8 @@ class Scheduler {
         st.state = 'cooling'
         st.cooldownUntil = cool
         this.mark(job)
-        // If all 3 slots are already preparing/active, wait for cooldown to expire
-        if (modelActive >= VERIFY_CONCURRENCY_PER_MODEL || lane.verifyActive >= VERIFY_PER_LANE) {
-          await sleep(Math.min(2000, cool - Date.now()))
-          continue
-        }
-        // Otherwise, allow this worker to dequeue and PREPARE the next candidate clip in memory!
+        await sleep(Math.min(2000, cool - Date.now()))
+        continue
       } else {
         st.cooldownUntil = null
       }
@@ -2987,7 +2983,41 @@ class Scheduler {
             chunk.requestCount = (chunk.requestCount || 0) + 1
             this.mark(job)
 
-            if (re.kind === 'overloaded') {
+            if (re.kind === 'timeout' || /timed out|timeout/i.test(re.message)) {
+              globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
+              const errTokenUsageTimeout: ChunkTokenUsage = {
+                shortVideoTokens: Math.round(segDuration * currentEmaRate),
+                chunkVideoTokens: Math.round(movieChunkDuration * currentEmaRate),
+                promptTokens: Math.round(promptChars / 4),
+                outputTokens: 0,
+                totalTokens: Math.round(totalVideoDurationSec * currentEmaRate + promptChars / 4),
+                shortDurationSec: Number(segDuration.toFixed(1)),
+                chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+                ratePerSec: Math.round(currentEmaRate),
+                isGoogleVerified: false,
+                isError: true,
+                errorMessage: `3m Request Timeout: No response from Gemini API`,
+              }
+              this.recordChunkOutput(
+                chunk,
+                m.id,
+                `[3-MINUTE TIMEOUT ERROR]\nModel: ${m.id} (Key ${lane.idx})\nStatus: Active request exceeded 3 minutes with no response from Gemini\nAction: Aborting request and switching to next model\nMessage: ${reqErr instanceof Error ? reqErr.message : String(reqErr)}`,
+                errTokenUsageTimeout,
+                'error',
+                reqErr instanceof Error ? reqErr.message : String(reqErr),
+              )
+              addLog(
+                scan,
+                'warn',
+                `${minutePrefix}Chunk ${chunkIndex}: ${displayModelName(m.id)} (key ${lane.idx}) timed out after 3 minutes without response — aborting request and switching to next model!`,
+              )
+              // Put this model lane on 1-min cooldown so other models or keys pick up this chunk
+              job.cooldownUntil[rk] = Date.now() + 60_000
+              st.state = 'cooling'
+              st.cooldownUntil = Date.now() + 60_000
+              this.mark(job)
+              throw reqErr
+            } else if (re.kind === 'overloaded') {
               overloadedRetries++
               if (overloadedRetries <= maxOverloadedRetries) {
                 const baseDelay = overloadedDelays[overloadedRetries - 1]
@@ -3123,18 +3153,66 @@ class Scheduler {
                 globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
                 throw retryErr
               }
-            } else if (re.kind === 'rate' || re.kind === 'rpd') {
+            } else if (googleDelayMs && googleDelayMs > 120_000) {
+              // Rate limit with delay > 120s:
+              // Per user rule: Do NOT treat as daily exhaustion! Daily exhaustion only happens when used >= m.rpd (e.g. 20 RPD in settings).
+              // Clear chunk lock, give THIS model/lane strictly a 1-minute cooldown (60s),
+              // and release chunk immediately to another model/lane!
+              globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
+              const cooldownMs = 60_000 // Sirf 1 minute ka cooldown
+              globalGeminiCoordinator.reportRateLimit(lane.apiKey, m.id, cooldownMs, 0)
+              job.cooldownUntil[rk] = Date.now() + cooldownMs
+              st.state = 'cooling'
+              st.cooldownUntil = Date.now() + cooldownMs
+              this.mark(job)
+              addLog(
+                scan,
+                'warn',
+                `${minutePrefix}Chunk ${chunkIndex}: Rate limit on ${displayModelName(m.id)} (key ${lane.idx}) — giving 1 min cooldown; handing chunk to another model!`,
+              )
+              throw reqErr
+            } else if (re.kind === 'rpd') {
+              // Daily Quota: ONLY if model actually reached configured RPD limit (e.g. 20 RPD)
+              const used = getModelUsage(m.id, lane.apiKey)
+              if (used >= (m.rpd || 20)) {
+                globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
+                globalGeminiCoordinator.reportExhausted(lane.apiKey, m.id, 0, m.rpd || 20)
+                setModelExhausted(m.id, lane.apiKey, m.rpd || 20)
+                st.state = 'exhausted'
+                this.mark(job)
+                addLog(
+                  scan,
+                  'warn',
+                  `${minutePrefix}Chunk ${chunkIndex}: Daily limit reached (${used}/${m.rpd || 20} RPD) on ${displayModelName(m.id)} (key ${lane.idx}) — model exhausted for today; chunk re-queued for another key!`,
+                )
+                throw reqErr
+              } else {
+                // If not yet reached 20 RPD, do NOT mark daily exhausted! Give 1-min cooldown and hand chunk to another model!
+                globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
+                const cooldownMs = 60_000
+                globalGeminiCoordinator.reportRateLimit(lane.apiKey, m.id, cooldownMs, 0)
+                job.cooldownUntil[rk] = Date.now() + cooldownMs
+                st.state = 'cooling'
+                st.cooldownUntil = Date.now() + cooldownMs
+                this.mark(job)
+                addLog(
+                  scan,
+                  'warn',
+                  `${minutePrefix}Chunk ${chunkIndex}: Rate limit on ${displayModelName(m.id)} (key ${lane.idx}, used ${used}/${m.rpd || 20} RPD) — giving 1 min cooldown; handing chunk to another model!`,
+                )
+                throw reqErr
+              }
+            } else if (re.kind === 'rate') {
+
               rateRetries++
               if (rateRetries > maxRateRetries) {
                 globalGeminiCoordinator.clearChunkRetryLock(lane.apiKey, m.id, chunkLockId)
                 throw reqErr
               }
-
-              const googleDelayMs = extractGoogleRetryDelayMs(reqErr) ?? re.retryDelayMs
               const { effectiveCooldownMs } = calculateEffectiveCooldownMs(googleDelayMs, 60_000)
 
-              // DYNAMIC COOLDOWN WITH EXCLUSIVE PRIORITY RETRY LOCK (Google requested delay + 5s buffer)
-              const cooldownMs = effectiveCooldownMs
+              // DYNAMIC COOLDOWN WITH EXCLUSIVE PRIORITY RETRY LOCK (Strict 2-minute max cap)
+              const cooldownMs = Math.min(120_000, effectiveCooldownMs)
               const coolUntil = Date.now() + cooldownMs
               job.cooldownUntil[rk] = coolUntil
               globalGeminiCoordinator.reportChunkRateLimit(lane.apiKey, m.id, chunkLockId, cooldownMs)
@@ -3292,7 +3370,8 @@ class Scheduler {
           e.kind === 'unavailable' ||
           e.kind === 'invalid_key' ||
           e.kind === 'empty' ||
-          /empty model response|empty response|no text returned|blockreason|safety|file upload|processing timed out|socket|econnreset|etimedout|500|502|503|504|overload/i.test(e.message)
+          e.kind === 'timeout' ||
+          /empty model response|empty response|no text returned|blockreason|safety|file upload|processing timed out|socket|econnreset|etimedout|500|502|503|504|overload|timed out|timeout/i.test(e.message)
 
         if (!isTransientInfra) {
           chunk.attempts = (chunk.attempts || 0) + 1
@@ -3370,6 +3449,15 @@ class Scheduler {
           }
           chunk.status = 'pending'
           job.queue.push(chunkIndex)
+        } else if (e.kind === 'timeout' || /timed out|timeout/i.test(e.message)) {
+          chunk.status = 'pending'
+          job.queue.push(chunkIndex)
+          const laneState = job.scan.keyLanes?.find((l) => l.idx === lane.idx)
+          if (laneState) {
+            const ms = laneState.models.find((item) => item.id === m.id)
+            if (ms) ms.state = 'cooling'
+          }
+          addLog(scan, 'warn', `${m.id} (key ${lane.idx}): Request timed out after 3 minutes without response — Chunk ${chunkIndex} re-queued for next model/lane.`)
         } else if (e.kind === 'empty') {
           chunk.status = 'pending'
           job.queue.push(chunkIndex)

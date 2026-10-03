@@ -358,15 +358,14 @@ class GlobalGeminiCoordinator {
               (verifyLockId && verifyLockId === vmState.retryLockId) ||
               slot === vmState.retryLockSlot
             if (!isAuthorizedRetry) {
-              const waitMsg = `[Global Coordinator] Key ${lane.keyIdx} · ${displayModelName(modelId)} waiting for 429 priority retry request to clear first...`
-              onWait?.(waitMsg, 2)
+              const waitMs = Math.max(1000, vmState.cooldownUntil - now)
               setTimeout(() => {
                 if (isStopping && isStopping()) {
                   reject(new Error('Stop requested while waiting for 429 priority retry'))
                   return
                 }
                 void tryAcquireOrQueue()
-              }, 1000)
+              }, Math.min(2000, waitMs))
               return
             }
           }
@@ -402,15 +401,14 @@ class GlobalGeminiCoordinator {
           if (cmState.retryLockId !== null) {
             const isAuthorizedRetry = Boolean(chunkLockId && chunkLockId === cmState.retryLockId)
             if (!isAuthorizedRetry) {
-              const waitMsg = `[Global Coordinator] Key ${lane.keyIdx} · ${displayModelName(modelId)} waiting for 429 priority chunk retry (${cmState.retryLockId}) to clear first...`
-              onWait?.(waitMsg, 2)
+              const waitMs = Math.max(1000, cmState.cooldownUntil - now)
               setTimeout(() => {
                 if (isStopping && isStopping()) {
                   reject(new Error('Stop requested while waiting for 429 priority chunk retry'))
                   return
                 }
                 void tryAcquireOrQueue()
-              }, 1000)
+              }, Math.min(2000, waitMs))
               return
             }
           }

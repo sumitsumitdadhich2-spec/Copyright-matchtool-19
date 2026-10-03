@@ -28,6 +28,7 @@ export type GeminiErrorKind =
   | 'policy_blocked'
   | 'overloaded'
   | 'model_unavailable'
+  | 'timeout'
   | 'other'
 
 /** Extra safety buffer added on top of Google Gemini's requested retryDelay (in ms) */
@@ -209,17 +210,23 @@ export function extractGoogleRetryDelayMs(err: unknown): number | null {
 
 /**
  * Calculates effective cooldown duration: Google's exact retry delay + user requested 5-second buffer.
+ * HARD SAFETY CAP: Never exceeds 120s for active retries (anything larger is daily quota reset).
  */
 export function calculateEffectiveCooldownMs(googleDelayMs: number | null | undefined, fallbackMs: number = 60_000): {
   googleDelayMs: number | null
   effectiveCooldownMs: number
   bufferMs: number
+  isDailyQuotaReset: boolean
 } {
-  const baseMs = typeof googleDelayMs === 'number' && googleDelayMs > 0 ? googleDelayMs : fallbackMs
+  const isDaily = typeof googleDelayMs === 'number' && googleDelayMs > 180_000
+  const cappedDelayMs = typeof googleDelayMs === 'number' && googleDelayMs > 0
+    ? Math.min(googleDelayMs, 120_000)
+    : fallbackMs
   return {
     googleDelayMs: typeof googleDelayMs === 'number' && googleDelayMs > 0 ? googleDelayMs : null,
-    effectiveCooldownMs: baseMs + GOOGLE_RETRY_SAFETY_BUFFER_MS,
+    effectiveCooldownMs: Math.min(120_000, cappedDelayMs + GOOGLE_RETRY_SAFETY_BUFFER_MS),
     bufferMs: GOOGLE_RETRY_SAFETY_BUFFER_MS,
+    isDailyQuotaReset: isDaily,
   }
 }
 
@@ -907,14 +914,7 @@ export function classifyError(
       !qIdLower.includes('perminute') &&
       !qIdLower.includes('per_minute')
     ) {
-      // SMART OVERRIDE: If Google explicitly provided a short retryDelay (e.g. 39s, 46s, 56s <= 5 min),
-      // Google's API Gateway is indicating a rolling/temporary bucket window, NOT a permanent day-long shutdown.
-      // Treat as 'rate' so it cools down for the requested duration and retries smoothly!
-      if (typeof googleRetryDelayMs === 'number' && googleRetryDelayMs > 0 && googleRetryDelayMs <= 300_000) {
-        kind = 'rate'
-      } else {
-        kind = 'rpd'
-      }
+      kind = 'rpd'
     } else {
       kind = 'rate'
     }
@@ -1642,6 +1642,8 @@ export interface MapChunkResult {
   thoughtsTokenCount?: number
 }
 
+export const CHUNK_MAP_TIMEOUT_MS = 180_000 // 3 minutes strictly for active generateContent request
+
 /** One chunk-map request: whole short video + one movie chunk, the SAME prompt every time.
  * Returns the raw model text (HISSA 1 + HISSA 2) along with usageMetadata — parsing happens separately. */
 export async function mapChunkRequest(
@@ -1650,33 +1652,50 @@ export async function mapChunkRequest(
   shortUri: string,
   chunkUri: string,
   customPrompt?: string,
+  timeoutMs: number = CHUNK_MAP_TIMEOUT_MS,
 ): Promise<MapChunkResult> {
+  let timer: NodeJS.Timeout | undefined
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { fileData: { fileUri: shortUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
-            { fileData: { fileUri: chunkUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
-            { text: customPrompt || CHUNK_MAP_PROMPT },
-          ] as never,
-        },
-      ],
-      config: GEN_CONFIG,
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new GeminiError('timeout', `Chunk mapping request timed out after ${(timeoutMs / 1000).toFixed(0)}s without response from Gemini API`))
+      }, timeoutMs)
     })
-    const details = extractResponseDetails(resp)
-    const text = checkResponseText(details, 'model')
-    return {
-      text,
-      promptTokenCount: details.usageMetadata?.promptTokenCount,
-      candidatesTokenCount: details.usageMetadata?.candidatesTokenCount,
-      totalTokenCount: details.usageMetadata?.totalTokenCount,
-      thoughtsTokenCount: details.usageMetadata?.thoughtsTokenCount,
-    }
+
+    const requestPromise = (async () => {
+      const resp = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { fileData: { fileUri: shortUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+              { fileData: { fileUri: chunkUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+              { text: customPrompt || CHUNK_MAP_PROMPT },
+            ] as never,
+          },
+        ],
+        config: GEN_CONFIG,
+      })
+      const details = extractResponseDetails(resp)
+      const text = checkResponseText(details, 'model')
+      return {
+        text,
+        promptTokenCount: details.usageMetadata?.promptTokenCount,
+        candidatesTokenCount: details.usageMetadata?.candidatesTokenCount,
+        totalTokenCount: details.usageMetadata?.totalTokenCount,
+        thoughtsTokenCount: details.usageMetadata?.thoughtsTokenCount,
+      }
+    })()
+
+    return await Promise.race([requestPromise, timeoutPromise])
   } catch (err) {
+    if (err instanceof GeminiError && err.kind === 'timeout') {
+      throw err
+    }
     throw classifyError(err, { model, requestKind: 'chunk_map' })
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
