@@ -1218,7 +1218,7 @@ class Scheduler {
                 if (job.queue.length === 0 && job.inFlight.size === 0) break
                 await sleep(500)
               }
-              if (!job.stopping && job.laneFirstSuccess.has(lane.idx)) {
+              if (!job.stopping && job.laneFirstSuccess.has(lane.idx) && (job.queue.length > 0 || job.inFlight.size > 0)) {
                 const secondaries = secondaryModels.map((m) => this.worker(job, lane, m))
                 await Promise.all(secondaries)
               }
@@ -1233,8 +1233,20 @@ class Scheduler {
         this.enqueueNewGroups(job)
 
         if (job.stopping) break
-        // Quota exhausted mid-minute: chunks still pending — do NOT advance.
-        if (seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) break
+
+        // Clean up any stray scanning status
+        for (const c of seg.chunks) {
+          if (c.status === 'scanning') c.status = 'pending'
+        }
+
+        // Only stop if ALL models across ALL lanes are genuinely exhausted for today
+        const anyActiveModel = job.lanes.some((l) =>
+          CHUNK_MODEL_POOL.some((m) => !globalGeminiCoordinator.isModelExhausted(l.apiKey, m.id, m.rpd))
+        )
+        if (!anyActiveModel) {
+          addLog(scan, 'error', `All models across all ${job.lanes.length} API keys are exhausted for today — cannot advance to next minute.`)
+          break
+        }
 
         // Minute ke saare chunks settle — turant AGLE minute par badho.
         // Is minute ki bachi verification background me poori hoti rahegi.
@@ -2709,6 +2721,20 @@ class Scheduler {
 
     while (true) {
       if (job.stopping) return
+
+      // IMMEDIATE MINUTE COMPLETION CHECK:
+      // If queue is empty AND no chunks are in flight, this minute's scanning is 100% done!
+      // Exit worker immediately so lanePromises resolve without delay!
+      if (job.queue.length === 0 && job.inFlight.size === 0) {
+        const st = this.modelState(job, lane, m)
+        if (st.state !== 'idle' && st.state !== 'exhausted') {
+          st.state = 'idle'
+          st.currentChunk = null
+          this.mark(job)
+        }
+        return
+      }
+
       const st = this.modelState(job, lane, m)
 
       // Fast RPD check via coordinator — instant background check, never send request N+1 past daily cap.
@@ -2725,6 +2751,14 @@ class Scheduler {
       // Cooldown check (RPM/TPM-type 429).
       const cool = job.cooldownUntil[this.rateKey(lane, m)] || 0
       if (cool > Date.now()) {
+        if (job.queue.length === 0 && job.inFlight.size === 0) {
+          if (st.state !== 'idle' && st.state !== 'exhausted') {
+            st.state = 'idle'
+            st.currentChunk = null
+            this.mark(job)
+          }
+          return
+        }
         st.state = 'cooling'
         st.cooldownUntil = cool
         st.currentChunk = null
@@ -2743,6 +2777,14 @@ class Scheduler {
       // to pull from job.queue immediately without any wait!
       const laneBusy = globalGeminiCoordinator.isLaneBusy(lane.apiKey, m.id, 0)
       if (laneBusy.busy) {
+        if (job.queue.length === 0 && job.inFlight.size === 0) {
+          if (st.state !== 'idle' && st.state !== 'exhausted') {
+            st.state = 'idle'
+            st.currentChunk = null
+            this.mark(job)
+          }
+          return
+        }
         st.state = laneBusy.cooling ? 'cooling' : 'waiting'
         st.currentChunk = null
         await sleep(1000)
