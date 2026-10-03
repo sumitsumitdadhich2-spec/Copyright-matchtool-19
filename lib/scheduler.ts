@@ -1663,8 +1663,16 @@ class Scheduler {
       if (gi === undefined) {
         // PIPELINE PARALLELISM: while the chunk phase is still running, verify
         // workers idle-wait — new candidate groups arrive as chunks finish.
-        // Only exit once the chunk phase is done AND nothing is in flight.
+        // Only exit once the chunk phase is done AND nothing is in flight AND no groups remain pending.
         if (job.verifyInFlight.size === 0 && job.chunkPhaseDone) {
+          const unverifiedLeft = (scan.candidateGroups || []).some(
+            (item) => item.status === 'pending',
+          )
+          if (unverifiedLeft) {
+            this.enqueueNewGroups(job)
+            await sleep(250)
+            continue
+          }
           if (st.state !== 'idle') {
             st.state = 'idle'
             this.mark(job)
@@ -1750,6 +1758,7 @@ class Scheduler {
         this.mark(job)
       } finally {
         job.verifyInFlight.delete(gi)
+        globalGeminiCoordinator.clearVerifyRetryLock(lane.apiKey, m.id, g.id)
         lane.verifyActive = Math.max(0, lane.verifyActive - 1)
         const rem = Math.max(0, (lane.verifyActiveByModel.get(m.id) || 1) - 1)
         lane.verifyActiveByModel.set(m.id, rem)
@@ -1968,7 +1977,8 @@ class Scheduler {
             job.cooldownUntil[rk] = Date.now() + effectiveCooldownMs
             job.cooldownUntil[pk] = Date.now() + effectiveCooldownMs
             if (isVerify) {
-              globalGeminiCoordinator.reportVerifyRateLimit(lane.apiKey, m.id, slot, verifyLockId, effectiveCooldownMs)
+              globalGeminiCoordinator.clearVerifyRetryLock(lane.apiKey, m.id, verifyLockId)
+              globalGeminiCoordinator.reportRateLimit(lane.apiKey, m.id, effectiveCooldownMs, slot)
             } else {
               globalGeminiCoordinator.reportRateLimit(lane.apiKey, m.id, effectiveCooldownMs, slot)
             }
@@ -3037,6 +3047,7 @@ class Scheduler {
             break
           } catch (reqErr) {
             const re = classifyError(reqErr, { keyIdx: lane.idx, model: m.id, requestKind: 'chunk_map' })
+            const googleDelayMs = extractGoogleRetryDelayMs(reqErr) ?? re.retryDelayMs
             const isPolicyBlocked =
               re.kind === 'policy_blocked' ||
               /prohibited_content|blocked_by_safety|safety_ratings_blocked|prompt block reason/i.test(re.message)

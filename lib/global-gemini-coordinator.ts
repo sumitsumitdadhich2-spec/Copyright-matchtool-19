@@ -354,19 +354,25 @@ class GlobalGeminiCoordinator {
           // 1. If 429 Priority Retry Lock is active on this model:
           // ONLY the request holding this retry lock is permitted through!
           if (vmState.retryLockId !== null) {
-            const isAuthorizedRetry =
-              (verifyLockId && verifyLockId === vmState.retryLockId) ||
-              slot === vmState.retryLockSlot
-            if (!isAuthorizedRetry) {
-              const waitMs = Math.max(1000, vmState.cooldownUntil - now)
-              setTimeout(() => {
-                if (isStopping && isStopping()) {
-                  reject(new Error('Stop requested while waiting for 429 priority retry'))
-                  return
-                }
-                void tryAcquireOrQueue()
-              }, Math.min(2000, waitMs))
-              return
+            // Auto-clear stale lock if cooldown has passed by > 5 seconds
+            if (now > vmState.cooldownUntil + 5000) {
+              vmState.retryLockId = null
+              vmState.retryLockSlot = null
+            } else {
+              const isAuthorizedRetry =
+                (verifyLockId && verifyLockId === vmState.retryLockId) ||
+                slot === vmState.retryLockSlot
+              if (!isAuthorizedRetry) {
+                const waitMs = Math.max(1000, vmState.cooldownUntil - now)
+                setTimeout(() => {
+                  if (isStopping && isStopping()) {
+                    reject(new Error('Stop requested while waiting for 429 priority retry'))
+                    return
+                  }
+                  void tryAcquireOrQueue()
+                }, Math.min(2000, waitMs))
+                return
+              }
             }
           }
 
@@ -399,17 +405,22 @@ class GlobalGeminiCoordinator {
           // 1. If 429 Priority Retry Lock is active on this model:
           // ONLY the request holding this retry lock is permitted through!
           if (cmState.retryLockId !== null) {
-            const isAuthorizedRetry = Boolean(chunkLockId && chunkLockId === cmState.retryLockId)
-            if (!isAuthorizedRetry) {
-              const waitMs = Math.max(1000, cmState.cooldownUntil - now)
-              setTimeout(() => {
-                if (isStopping && isStopping()) {
-                  reject(new Error('Stop requested while waiting for 429 priority chunk retry'))
-                  return
-                }
-                void tryAcquireOrQueue()
-              }, Math.min(2000, waitMs))
-              return
+            // Auto-clear stale lock if cooldown has passed by > 5 seconds
+            if (now > cmState.cooldownUntil + 5000) {
+              cmState.retryLockId = null
+            } else {
+              const isAuthorizedRetry = Boolean(chunkLockId && chunkLockId === cmState.retryLockId)
+              if (!isAuthorizedRetry) {
+                const waitMs = Math.max(1000, cmState.cooldownUntil - now)
+                setTimeout(() => {
+                  if (isStopping && isStopping()) {
+                    reject(new Error('Stop requested while waiting for 429 priority chunk retry'))
+                    return
+                  }
+                  void tryAcquireOrQueue()
+                }, Math.min(2000, waitMs))
+                return
+              }
             }
           }
 
