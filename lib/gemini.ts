@@ -1640,12 +1640,13 @@ export interface MapChunkResult {
   candidatesTokenCount?: number
   totalTokenCount?: number
   thoughtsTokenCount?: number
+  elapsedMs: number
 }
 
-export const CHUNK_MAP_TIMEOUT_MS = 180_000 // 3 minutes strictly for active generateContent request
+export const CHUNK_MAP_TIMEOUT_MS = 240_000 // 4 minutes safety timeout for large video chunks (~140k tokens)
 
 /** One chunk-map request: whole short video + one movie chunk, the SAME prompt every time.
- * Returns the raw model text (HISSA 1 + HISSA 2) along with usageMetadata — parsing happens separately. */
+ * Returns the raw model text (HISSA 1 + HISSA 2) along with usageMetadata and execution timing. */
 export async function mapChunkRequest(
   ai: GoogleGenAI,
   model: string,
@@ -1653,14 +1654,31 @@ export async function mapChunkRequest(
   chunkUri: string,
   customPrompt?: string,
   timeoutMs: number = CHUNK_MAP_TIMEOUT_MS,
+  onProgress?: (elapsedSec: number) => void,
 ): Promise<MapChunkResult> {
   let timer: NodeJS.Timeout | undefined
+  let progressInterval: NodeJS.Timeout | undefined
+  const startMs = Date.now()
+
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        reject(new GeminiError('timeout', `Chunk mapping request timed out after ${(timeoutMs / 1000).toFixed(0)}s without response from Gemini API`))
+        const elapsedSec = ((Date.now() - startMs) / 1000).toFixed(1)
+        reject(
+          new GeminiError(
+            'timeout',
+            `Chunk mapping request timed out after ${elapsedSec}s (limit: ${(timeoutMs / 1000).toFixed(0)}s) without response from Gemini API on ${model}`,
+          ),
+        )
       }, timeoutMs)
     })
+
+    if (onProgress) {
+      progressInterval = setInterval(() => {
+        const sec = Math.round((Date.now() - startMs) / 1000)
+        onProgress(sec)
+      }, 30_000)
+    }
 
     const requestPromise = (async () => {
       const resp = await ai.models.generateContent({
@@ -1679,12 +1697,14 @@ export async function mapChunkRequest(
       })
       const details = extractResponseDetails(resp)
       const text = checkResponseText(details, 'model')
+      const elapsedMs = Date.now() - startMs
       return {
         text,
         promptTokenCount: details.usageMetadata?.promptTokenCount,
         candidatesTokenCount: details.usageMetadata?.candidatesTokenCount,
         totalTokenCount: details.usageMetadata?.totalTokenCount,
         thoughtsTokenCount: details.usageMetadata?.thoughtsTokenCount,
+        elapsedMs,
       }
     })()
 
@@ -1696,6 +1716,7 @@ export async function mapChunkRequest(
     throw classifyError(err, { model, requestKind: 'chunk_map' })
   } finally {
     if (timer) clearTimeout(timer)
+    if (progressInterval) clearInterval(progressInterval)
   }
 }
 
@@ -2074,17 +2095,21 @@ function parseTs(ts: string): number | null {
  * constant offset (movieStart - shortStart), the model broke prompt rule 4
  * (NO EXTRAPOLATION) and just applied "short_time + offset" A to Z. */
 export function isSuspiciousChunkOutput(raw: string, matches: ChunkMatch[]): string | null {
-  // Signal 1: not a single NOT FOUND line in the whole output.
-  if (!/NOT\s*FOUND/i.test(raw)) {
-    return 'output me kahin bhi NOT FOUND nahi hai — model ne sab kuch map kar diya (false result)'
+  // Signal 1: not a single NOT FOUND line in the whole output and mapped a large number of matches.
+  // Note: if the model mapped only 1 or 2 small clips, it may not need extensive NOT FOUND if short is brief.
+  if (!/NOT\s*FOUND/i.test(raw) && matches.length >= 6) {
+    return 'output me kahin bhi NOT FOUND nahi hai — model ne poora chunk blind map kar diya (false result)'
   }
-  // Signal 2: all matches share one fixed offset (extrapolation drift).
-  if (matches.length >= 4) {
+  // Signal 2: Fake whole-video extrapolation across nearly the entire duration (>45 seconds)
+  // Continuous 2-5 second shots naturally share the same offset (normal playback speed),
+  // which is authentic video matching. We only flag if a massive span (>45s) was blindly mapped with zero variation AND no NOT FOUND.
+  if (matches.length >= 8) {
     const offsets = matches.map((m) => m.movieStart - m.shortStart)
     const min = Math.min(...offsets)
     const max = Math.max(...offsets)
-    if (max - min < 0.25) {
-      return `saare ${matches.length} matches ek hi fixed offset (+${min.toFixed(3)}s) par hain — extrapolated A-to-Z mapping (prompt rule 4 break)`
+    const shortSpan = Math.max(...matches.map((m) => m.shortEnd)) - Math.min(...matches.map((m) => m.shortStart))
+    if (max - min < 0.25 && shortSpan > 45 && !/NOT\s*FOUND/i.test(raw)) {
+      return `saare ${matches.length} matches poore video (>45s) par ek hi fixed offset (+${min.toFixed(3)}s) par extrapolated hain`
     }
   }
   return null
