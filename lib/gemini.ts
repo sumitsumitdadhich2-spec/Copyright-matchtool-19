@@ -1637,6 +1637,9 @@ function parseFinderGeneric(
 export interface MapChunkResult {
   text: string
   promptTokenCount?: number
+  candidatesTokenCount?: number
+  totalTokenCount?: number
+  thoughtsTokenCount?: number
 }
 
 /** One chunk-map request: whole short video + one movie chunk, the SAME prompt every time.
@@ -1668,6 +1671,9 @@ export async function mapChunkRequest(
     return {
       text,
       promptTokenCount: details.usageMetadata?.promptTokenCount,
+      candidatesTokenCount: details.usageMetadata?.candidatesTokenCount,
+      totalTokenCount: details.usageMetadata?.totalTokenCount,
+      thoughtsTokenCount: details.usageMetadata?.thoughtsTokenCount,
     }
   } catch (err) {
     throw classifyError(err, { model, requestKind: 'chunk_map' })

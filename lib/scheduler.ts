@@ -1,7 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, ChunkState, ChunkMatch, CandidateGroup, ShortSegmentState, ScanReport, ShortCoverage } from './types'
+import type { Scan, ChunkState, ChunkMatch, CandidateGroup, ShortSegmentState, ScanReport, ShortCoverage, ChunkTokenUsage } from './types'
 import {
   MODEL_POOL,
   CHUNK_MODEL_POOL,
@@ -677,17 +677,27 @@ class Scheduler {
     }
   }
 
-  /** Persist a verbatim Gemini response on a chunk (drives the UI raw-output expander).
-   *  Bounded: 20KB per entry, max 12 entries per chunk (oldest dropped). */
-  private recordChunkOutput(chunk: ChunkState | undefined, model: string, text?: string) {
-    if (!chunk || !text) return
+  /** Persist a verbatim Gemini response or diagnostic error on a chunk (drives the UI raw-output expander).
+   *  Bounded: 20KB per entry, max 16 entries per chunk (oldest dropped). */
+  private recordChunkOutput(
+    chunk: ChunkState | undefined,
+    model: string,
+    text?: string,
+    tokens?: ChunkTokenUsage,
+    status: 'success' | 'error' = 'success',
+    error?: string,
+  ) {
+    if (!chunk || (!text && !error)) return
     if (!chunk.rawOutputs) chunk.rawOutputs = []
     chunk.rawOutputs.push({
       model,
       t: Date.now(),
-      text: text.length > 20_000 ? `${text.slice(0, 20_000)}\n... [truncated]` : text,
+      text: text && text.length > 20_000 ? `${text.slice(0, 20_000)}\n... [truncated]` : (text || ''),
+      tokens,
+      status,
+      error,
     })
-    if (chunk.rawOutputs.length > 12) chunk.rawOutputs.splice(0, chunk.rawOutputs.length - 12)
+    if (chunk.rawOutputs.length > 16) chunk.rawOutputs.splice(0, chunk.rawOutputs.length - 16)
   }
 
   /** modelStates key: lane 1 uses the plain model id (drives the Model Pool board);
@@ -2891,6 +2901,7 @@ class Scheduler {
         let overloadedRetries = 0
         const maxOverloadedRetries = 3
         const overloadedDelays = [5_000, 15_000, 45_000]
+        let lastTokenUsage: ChunkTokenUsage | undefined
 
         while (true) {
           if (job.stopping) {
@@ -2905,13 +2916,39 @@ class Scheduler {
             const mapRes = await mapChunkRequest(lane.ai, m.id, effectiveShortUri, effectiveUploadedUri, effectivePrompt)
             raw = mapRes.text
 
+            let actualRate = currentEmaRate
+            let shortVideoTokens = Math.round(segDuration * currentEmaRate)
+            let chunkVideoTokens = Math.round(movieChunkDuration * currentEmaRate)
+            let isGoogleVerified = false
+
             if (mapRes.promptTokenCount && totalVideoDurationSec > 0) {
               const actualPromptTokens = mapRes.promptTokenCount
               const videoTokens = Math.max(0, actualPromptTokens - promptChars / 4)
-              const actualRate = videoTokens / totalVideoDurationSec
+              actualRate = videoTokens / totalVideoDurationSec
               const prevEMA = this.modelTokenRateEMA.get(m.id) ?? 260
               const alpha = 0.2
               this.modelTokenRateEMA.set(m.id, alpha * actualRate + (1 - alpha) * prevEMA)
+
+              shortVideoTokens = Math.round(segDuration * actualRate)
+              chunkVideoTokens = Math.round(movieChunkDuration * actualRate)
+              isGoogleVerified = true
+            }
+
+            const promptTokens = Math.round(promptChars / 4)
+            const outputTokens = mapRes.candidatesTokenCount ?? 0
+            const totalTokens = mapRes.totalTokenCount ?? (shortVideoTokens + chunkVideoTokens + promptTokens + outputTokens)
+
+            lastTokenUsage = {
+              shortVideoTokens,
+              chunkVideoTokens,
+              promptTokens,
+              outputTokens,
+              totalTokens,
+              shortDurationSec: Number(segDuration.toFixed(1)),
+              chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+              ratePerSec: Math.round(actualRate),
+              isGoogleVerified,
+              isError: false,
             }
 
             const used = incrementModelUsage(m.id, lane.apiKey)
@@ -2959,6 +2996,27 @@ class Scheduler {
 
                 // Log exactly "503 overloaded" (not "quota error") per model so identical lines aggregate into "(x10)"
                 addLog(scan, 'warn', `${m.id} (key ${lane.idx}): 503 overloaded`)
+                const errTokenUsage503: ChunkTokenUsage = {
+                  shortVideoTokens: Math.round(segDuration * currentEmaRate),
+                  chunkVideoTokens: Math.round(movieChunkDuration * currentEmaRate),
+                  promptTokens: Math.round(promptChars / 4),
+                  outputTokens: 0,
+                  totalTokens: Math.round(totalVideoDurationSec * currentEmaRate + promptChars / 4),
+                  shortDurationSec: Number(segDuration.toFixed(1)),
+                  chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+                  ratePerSec: Math.round(currentEmaRate),
+                  isGoogleVerified: false,
+                  isError: true,
+                  errorMessage: `503 Overloaded (Attempt ${overloadedRetries}/${maxOverloadedRetries})`,
+                }
+                this.recordChunkOutput(
+                  chunk,
+                  m.id,
+                  `[503 OVERLOADED ERROR]\nModel: ${m.id} (Key ${lane.idx})\nStatus: Model experiencing high demand\nBackoff: ${(waitMs / 1000).toFixed(1)}s (Attempt ${overloadedRetries}/${maxOverloadedRetries})\nMessage: ${reqErr instanceof Error ? reqErr.message : String(reqErr)}`,
+                  errTokenUsage503,
+                  'error',
+                  reqErr instanceof Error ? reqErr.message : String(reqErr),
+                )
                 this.mark(job)
 
                 await this.stoppableSleep(job, waitMs)
@@ -3019,6 +3077,34 @@ class Scheduler {
               try {
                 const sanitizedRes = await mapChunkRequest(lane.ai, m.id, sanitizedShortUri, sanitizedUploaded.uri, CHUNK_MAP_SANITIZED_PROMPT)
                 raw = sanitizedRes.text
+                const promptCharsSanitized = CHUNK_MAP_SANITIZED_PROMPT.length
+                let actualRateSanitized = currentEmaRate
+                let shortVideoTokensSanitized = Math.round(segDuration * currentEmaRate)
+                let chunkVideoTokensSanitized = Math.round(movieChunkDuration * currentEmaRate)
+                let isGoogleVerifiedSanitized = false
+                if (sanitizedRes.promptTokenCount && totalVideoDurationSec > 0) {
+                  const actualPromptTokens = sanitizedRes.promptTokenCount
+                  const videoTokens = Math.max(0, actualPromptTokens - promptCharsSanitized / 4)
+                  actualRateSanitized = videoTokens / totalVideoDurationSec
+                  shortVideoTokensSanitized = Math.round(segDuration * actualRateSanitized)
+                  chunkVideoTokensSanitized = Math.round(movieChunkDuration * actualRateSanitized)
+                  isGoogleVerifiedSanitized = true
+                }
+                const promptTokensSanitized = Math.round(promptCharsSanitized / 4)
+                const outputTokensSanitized = sanitizedRes.candidatesTokenCount ?? 0
+                const totalTokensSanitized = sanitizedRes.totalTokenCount ?? (shortVideoTokensSanitized + chunkVideoTokensSanitized + promptTokensSanitized + outputTokensSanitized)
+                lastTokenUsage = {
+                  shortVideoTokens: shortVideoTokensSanitized,
+                  chunkVideoTokens: chunkVideoTokensSanitized,
+                  promptTokens: promptTokensSanitized,
+                  outputTokens: outputTokensSanitized,
+                  totalTokens: totalTokensSanitized,
+                  shortDurationSec: Number(segDuration.toFixed(1)),
+                  chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+                  ratePerSec: Math.round(actualRateSanitized),
+                  isGoogleVerified: isGoogleVerifiedSanitized,
+                  isError: false,
+                }
                 const usedRetry = incrementModelUsage(m.id, lane.apiKey)
                 st.usedToday = usedRetry
                 chunk.requestCount = (chunk.requestCount || 0) + 1
@@ -3063,6 +3149,27 @@ class Scheduler {
                 'warn',
                 `${minutePrefix}Chunk ${chunkIndex}: 429 rate limit on ${displayModelName(m.id)} (key ${lane.idx})${googleNote} — giving ${(cooldownMs / 1000).toFixed(1)}s lock. Priority Lock held; will send first when lock expires (attempt ${rateRetries}/${maxRateRetries}).`,
               )
+              const errTokenUsage429: ChunkTokenUsage = {
+                shortVideoTokens: Math.round(segDuration * currentEmaRate),
+                chunkVideoTokens: Math.round(movieChunkDuration * currentEmaRate),
+                promptTokens: Math.round(promptChars / 4),
+                outputTokens: 0,
+                totalTokens: Math.round(totalVideoDurationSec * currentEmaRate + promptChars / 4),
+                shortDurationSec: Number(segDuration.toFixed(1)),
+                chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+                ratePerSec: Math.round(currentEmaRate),
+                isGoogleVerified: false,
+                isError: true,
+                errorMessage: `429 Rate Limit (Attempt ${rateRetries}/${maxRateRetries} — ${(cooldownMs / 1000).toFixed(1)}s lock)`,
+              }
+              this.recordChunkOutput(
+                chunk,
+                m.id,
+                `[429 RATE LIMIT EXCEEDED]\nModel: ${m.id} (Key ${lane.idx})\nStatus: Quota exceeded / high demand spike\nWait Duration: ${(cooldownMs / 1000).toFixed(1)}s lock (Attempt ${rateRetries}/${maxRateRetries})\nMessage: ${reqErr instanceof Error ? reqErr.message : String(reqErr)}`,
+                errTokenUsage429,
+                'error',
+                reqErr instanceof Error ? reqErr.message : String(reqErr),
+              )
 
               const waitMs = coolUntil - Date.now()
               if (waitMs > 0) {
@@ -3093,7 +3200,7 @@ class Scheduler {
           }
         }
 
-        this.recordChunkOutput(chunk, m.id, raw)
+        this.recordChunkOutput(chunk, m.id, raw, lastTokenUsage, 'success')
 
         // Model timestamps are LOCAL to the 1-minute segment file — shift them by
         // seg.start so every stored match carries ABSOLUTE short-video seconds.
@@ -3146,10 +3253,26 @@ class Scheduler {
         const e = err instanceof GeminiError ? err : classifyError(err, { keyIdx: lane.idx, model: m.id, requestKind: 'chunk_map' })
 
         // Always record error & diagnostic in chunk output so user can click 'AI output' and see what happened.
+        const outerErrTokens: ChunkTokenUsage = {
+          shortVideoTokens: Math.round(segDuration * currentEmaRate),
+          chunkVideoTokens: Math.round(movieChunkDuration * currentEmaRate),
+          promptTokens: Math.round(promptChars / 4),
+          outputTokens: 0,
+          totalTokens: Math.round(totalVideoDurationSec * currentEmaRate + promptChars / 4),
+          shortDurationSec: Number(segDuration.toFixed(1)),
+          chunkDurationSec: Number(movieChunkDuration.toFixed(1)),
+          ratePerSec: Math.round(currentEmaRate),
+          isGoogleVerified: false,
+          isError: true,
+          errorMessage: e.message.slice(0, 160),
+        }
         this.recordChunkOutput(
           chunk,
           m.id,
           `[ERROR / DIAGNOSTIC]\nModel: ${m.id} (Key ${lane.idx})\nError: ${e.message}\nTime: ${new Date().toISOString()}`,
+          outerErrTokens,
+          'error',
+          e.message,
         )
 
         // INFRASTRUCTURE / TRANSIENT ERROR CHECK:

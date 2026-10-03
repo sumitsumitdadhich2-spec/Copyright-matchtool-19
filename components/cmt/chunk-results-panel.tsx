@@ -2,8 +2,22 @@
 
 import { useEffect, useState } from 'react'
 import { useSWRConfig } from 'swr'
-import { ChevronDown, ChevronRight, Clock3, FileText, RotateCcw } from 'lucide-react'
-import type { Scan, ChunkState } from '@/lib/types'
+import {
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  FileText,
+  RotateCcw,
+  AlertTriangle,
+  CheckCircle2,
+  Film,
+  Video,
+  Calculator,
+  Sparkles,
+  Copy,
+  Check,
+} from 'lucide-react'
+import type { Scan, ChunkState, ChunkRawOutput } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 import { displayModelName } from '@/lib/models'
 
@@ -202,23 +216,252 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
         </p>
       )}
       {open && raws.length > 0 && (
-        <div className="flex flex-col gap-2 border-t border-border px-3 py-2">
+        <div className="flex flex-col gap-2.5 border-t border-border px-3 py-2.5">
           {raws.map((r, i) => (
-            <div key={`${r.t}-${i}`} className="rounded-md border border-border bg-card">
-              <div className="flex flex-wrap items-center gap-2 border-b border-border px-2 py-1">
-                <FileText className="size-3.5 text-muted-foreground" aria-hidden />
-                <span className="font-mono text-[10px] text-muted-foreground">{displayModelName(r.model)}</span>
-                <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-                  {new Date(r.t).toLocaleTimeString()}
-                </span>
-              </div>
-              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-2 font-mono text-[10px] leading-relaxed text-foreground">
-                {r.text}
-              </pre>
-            </div>
+            <ChunkRawCard key={`${r.t}-${i}`} r={r} scan={scan} segIdx={segIdx} />
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ChunkTokenMetrics({
+  raw,
+  scan,
+  segIdx,
+}: {
+  raw: ChunkRawOutput
+  scan: Scan
+  segIdx?: number
+}) {
+  const isError =
+    raw.status === 'error' ||
+    raw.tokens?.isError ||
+    raw.text.startsWith('[ERROR') ||
+    raw.text.includes('429 RATE LIMIT') ||
+    raw.text.includes('503 OVERLOADED')
+
+  // Use stored tokens or fallback calculation for older entries
+  const segs = scan.shortSegments
+  const activeSegIdx = segIdx ?? scan.currentShortSegment ?? 0
+  const seg = segs && segs[activeSegIdx]
+  const segDur = seg ? Math.max(1, seg.end - seg.start) : 60
+  const chunkDur = 60
+  const defaultRate = 260
+  const promptToks = 1200
+  const outToks = isError ? 0 : Math.round(raw.text.length / 4)
+
+  const tokens = raw.tokens || {
+    shortVideoTokens: Math.round(segDur * defaultRate),
+    chunkVideoTokens: Math.round(chunkDur * defaultRate),
+    promptTokens: promptToks,
+    outputTokens: outToks,
+    totalTokens: Math.round((segDur + chunkDur) * defaultRate + promptToks + outToks),
+    shortDurationSec: Number(segDur.toFixed(1)),
+    chunkDurationSec: chunkDur,
+    ratePerSec: defaultRate,
+    isGoogleVerified: false,
+    isError,
+    errorMessage: isError ? 'Request error' : undefined,
+  }
+
+  return (
+    <div className="space-y-2 border-b border-border bg-muted/20 p-2.5">
+      {/* 5 Data Metric Cards */}
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Short Video */}
+        <div className="flex flex-col justify-between rounded-md border border-border/80 bg-background/90 p-2">
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <Video className="size-3.5 text-blue-500" aria-hidden />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Short Video</span>
+          </div>
+          <div className="mt-1">
+            <span className="font-mono text-sm font-bold text-foreground">
+              {tokens.shortVideoTokens.toLocaleString()}
+            </span>
+            <span className="ml-1 text-[10px] text-muted-foreground">tok</span>
+          </div>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">{tokens.shortDurationSec}s @ 24 fps</p>
+        </div>
+
+        {/* Chunk 1m Video */}
+        <div className="flex flex-col justify-between rounded-md border border-border/80 bg-background/90 p-2">
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <Film className="size-3.5 text-indigo-500" aria-hidden />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Chunk Video</span>
+          </div>
+          <div className="mt-1">
+            <span className="font-mono text-sm font-bold text-foreground">
+              {tokens.chunkVideoTokens.toLocaleString()}
+            </span>
+            <span className="ml-1 text-[10px] text-muted-foreground">tok</span>
+          </div>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">{tokens.chunkDurationSec}s (1 min chunk)</p>
+        </div>
+
+        {/* Prompt */}
+        <div className="flex flex-col justify-between rounded-md border border-border/80 bg-background/90 p-2">
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <FileText className="size-3.5 text-amber-500" aria-hidden />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Prompt / Rule</span>
+          </div>
+          <div className="mt-1">
+            <span className="font-mono text-sm font-bold text-foreground">
+              {tokens.promptTokens.toLocaleString()}
+            </span>
+            <span className="ml-1 text-[10px] text-muted-foreground">tok</span>
+          </div>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">Instructions</p>
+        </div>
+
+        {/* Output */}
+        <div
+          className={`flex flex-col justify-between rounded-md border p-2 ${
+            isError ? 'border-destructive/30 bg-destructive/10' : 'border-border/80 bg-background/90'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <Sparkles className={`size-3.5 ${isError ? 'text-destructive' : 'text-emerald-500'}`} aria-hidden />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Output Tokens</span>
+          </div>
+          <div className="mt-1">
+            <span className={`font-mono text-sm font-bold ${isError ? 'text-destructive' : 'text-foreground'}`}>
+              {tokens.outputTokens.toLocaleString()}
+            </span>
+            <span className="ml-1 text-[10px] text-muted-foreground">tok</span>
+          </div>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            {isError ? '0 (Error / No Output)' : 'Generated Text'}
+          </p>
+        </div>
+
+        {/* Total Tokens */}
+        <div className="col-span-2 flex flex-col justify-between rounded-md border border-primary/40 bg-primary/10 p-2 sm:col-span-1">
+          <div className="flex items-center gap-1.5 text-primary">
+            <Calculator className="size-3.5" aria-hidden />
+            <span className="text-[10px] font-bold uppercase tracking-wider">Total Tokens</span>
+          </div>
+          <div className="mt-1">
+            <span className="font-mono text-sm font-black text-primary">
+              {tokens.totalTokens.toLocaleString()}
+            </span>
+            <span className="ml-1 text-[10px] text-primary/80">tok</span>
+          </div>
+          <p className="mt-0.5 text-[10px] font-medium text-primary/80">
+            {tokens.isGoogleVerified ? 'Google Verified ✓' : `Rate ~${tokens.ratePerSec || 260} tok/s`}
+          </p>
+        </div>
+      </div>
+
+      {/* Formula & Calculation Breakdown Banner */}
+      <div
+        className={`flex flex-wrap items-center justify-between gap-1.5 rounded border px-2 py-1 text-[10px] font-mono ${
+          isError
+            ? 'border-destructive/30 bg-destructive/15 text-destructive'
+            : 'border-border/70 bg-background text-muted-foreground'
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="font-semibold text-foreground">Token Calculation:</span>
+          <span>Short ({tokens.shortVideoTokens.toLocaleString()})</span>
+          <span>+</span>
+          <span>Chunk ({tokens.chunkVideoTokens.toLocaleString()})</span>
+          <span>+</span>
+          <span>Prompt ({tokens.promptTokens.toLocaleString()})</span>
+          {tokens.outputTokens > 0 && (
+            <>
+              <span>+</span>
+              <span>Output ({tokens.outputTokens.toLocaleString()})</span>
+            </>
+          )}
+          <span>=</span>
+          <span className="font-bold text-foreground">
+            {tokens.totalTokens.toLocaleString()} Total Tokens
+          </span>
+        </div>
+        {isError && (
+          <span className="text-[10px] font-sans font-medium text-destructive">
+            ⚠️ Input videos prepared & sent; model hit error before response.
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ChunkRawCard({
+  r,
+  scan,
+  segIdx,
+}: {
+  r: ChunkRawOutput
+  scan: Scan
+  segIdx?: number
+}) {
+  const [copied, setCopied] = useState(false)
+  const isError =
+    r.status === 'error' ||
+    r.tokens?.isError ||
+    r.text.startsWith('[ERROR') ||
+    r.text.includes('429 RATE LIMIT') ||
+    r.text.includes('503 OVERLOADED')
+
+  async function copyText() {
+    try {
+      await navigator.clipboard.writeText(r.text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <div
+      className={`rounded-md border bg-card transition-colors ${
+        isError ? 'border-destructive/40 shadow-sm' : 'border-border'
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-2.5 py-1.5">
+        <FileText className="size-3.5 text-muted-foreground" aria-hidden />
+        <span className="font-mono text-xs font-semibold text-foreground">{displayModelName(r.model)}</span>
+        {isError ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/15 px-2 py-0.5 text-[10px] font-medium text-destructive">
+            <AlertTriangle className="size-3" aria-hidden />
+            Attempt Failed (429 / 503 / Error)
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            <CheckCircle2 className="size-3" aria-hidden />
+            Analysis Succeeded
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+          {new Date(r.t).toLocaleTimeString()}
+        </span>
+        <button
+          type="button"
+          onClick={copyText}
+          title="Copy output text"
+          className="flex items-center gap-1 rounded border border-input bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary"
+        >
+          {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Token Metrics Section */}
+      <ChunkTokenMetrics raw={r} scan={scan} segIdx={segIdx} />
+
+      {/* Raw Text Output */}
+      <pre
+        className={`max-h-80 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[10px] leading-relaxed ${
+          isError ? 'bg-destructive/5 text-destructive-foreground' : 'text-foreground'
+        }`}
+      >
+        {r.text}
+      </pre>
     </div>
   )
 }
