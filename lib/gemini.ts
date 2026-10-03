@@ -1643,7 +1643,7 @@ export interface MapChunkResult {
   elapsedMs: number
 }
 
-export const CHUNK_MAP_TIMEOUT_MS = 240_000 // 4 minutes safety timeout for large video chunks (~140k tokens)
+export const CHUNK_MAP_TIMEOUT_MS = 360_000 // 6 minutes safety timeout for large video chunks (~160k-200k tokens generating up to 4k+ tokens)
 
 /** One chunk-map request: whole short video + one movie chunk, the SAME prompt every time.
  * Returns the raw model text (HISSA 1 + HISSA 2) along with usageMetadata and execution timing. */
