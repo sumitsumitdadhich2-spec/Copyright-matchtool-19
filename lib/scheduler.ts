@@ -47,6 +47,7 @@ import {
   deleteFileQuiet,
   cleanupOrphanedGeminiFiles,
   mapChunkRequest,
+  CHUNK_MAP_TIMEOUT_MS,
   CHUNK_MAP_PROMPT,
   CHUNK_MAP_SANITIZED_PROMPT,
   parseChunkMatches,
