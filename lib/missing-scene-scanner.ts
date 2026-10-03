@@ -854,6 +854,27 @@ PART <number>: NOT FOUND`
                 }
                 windowHits.push(hit)
                 state.windowHits = [...windowHits]
+
+                // Also register as an initial candidate so the user can preview it immediately!
+                const hitCandId = `winhit-${foundMinute}-${scenePart.target.id}`
+                if (!candidates.some((c) => c.id === hitCandId || (c.movieMinute === foundMinute && c.sceneId === scenePart.target.id))) {
+                  const mStart = foundMinute * 60
+                  const mEnd = mStart + Math.max(1, scenePart.target.shortEnd - scenePart.target.shortStart)
+                  candidates.push({
+                    id: hitCandId,
+                    sceneId: scenePart.target.id,
+                    shortStart: scenePart.target.shortStart,
+                    shortEnd: scenePart.target.shortEnd,
+                    movieMinute: foundMinute,
+                    chunkIndex: foundMinute,
+                    movieStart: mStart,
+                    movieEnd: mEnd,
+                    model: `${selected.modelId} (Window ${win.index + 1} Hit)`,
+                    status: 'pending',
+                  })
+                  state.candidates = [...candidates]
+                }
+
                 saveScan(scan)
                 addLog(
                   scan,
@@ -912,7 +933,7 @@ PART <number>: NOT FOUND`
     state.progress = candidates.length > 0
       ? `Scan finished! ${candidates.length} candidate match(es) found — review and accept/reject below.`
       : windowHits.length > 0
-      ? `Window scan found ${windowHits.length} potential hit(s), but exact frame alignment was not confirmed.`
+      ? `Scan finished! ${windowHits.length} window hit(s) found — review side-by-side below and accept/reject.`
       : `Scan finished! No matching scenes found in the selected windows.`
     state.finishedAt = Date.now()
     saveScan(scan)
@@ -945,10 +966,37 @@ export function reviewMissingSceneCandidate(
   candidateId: string,
   action: 'accept' | 'reject',
 ): { ok: boolean; error?: string } {
-  if (!scan.missingSceneScan || !Array.isArray(scan.missingSceneScan.candidates)) {
-    return { ok: false, error: 'No missing scene candidates in this scan' }
+  if (!scan.missingSceneScan) {
+    return { ok: false, error: 'No missing scene scan in this scan' }
   }
-  const cand = scan.missingSceneScan.candidates.find((c) => c.id === candidateId)
+  if (!Array.isArray(scan.missingSceneScan.candidates)) {
+    scan.missingSceneScan.candidates = []
+  }
+
+  let cand = scan.missingSceneScan.candidates.find((c) => c.id === candidateId)
+  if (!cand && candidateId.startsWith('winhit-')) {
+    const hit = (scan.missingSceneScan.windowHits || []).find(
+      (h) => `winhit-${h.movieMinute}-${h.sceneId}` === candidateId,
+    )
+    if (hit) {
+      const mStart = hit.movieMinute * 60
+      const mEnd = mStart + Math.max(1, hit.shortEnd - hit.shortStart)
+      cand = {
+        id: candidateId,
+        sceneId: hit.sceneId,
+        shortStart: hit.shortStart,
+        shortEnd: hit.shortEnd,
+        movieMinute: hit.movieMinute,
+        chunkIndex: hit.movieMinute,
+        movieStart: mStart,
+        movieEnd: mEnd,
+        model: `Window ${hit.windowIndex + 1} Hit (Movie Min ${hit.movieMinute})`,
+        status: 'pending',
+      }
+      scan.missingSceneScan.candidates.push(cand)
+    }
+  }
+
   if (!cand) return { ok: false, error: 'Candidate not found' }
 
   if (action === 'accept') {

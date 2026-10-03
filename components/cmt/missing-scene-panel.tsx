@@ -73,6 +73,38 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
   const detectedGaps = data?.detectedGaps || []
   const allAvailableScenes: MissingSceneTarget[] = [...detectedGaps, ...customScenes]
 
+  // Merge window hits into reviewable candidates so the user can ALWAYS preview them side-by-side and accept/reject them!
+  const rawCandidates = state?.candidates || []
+  const windowHitCandidates: MissingSceneCandidate[] = (state?.windowHits || [])
+    .filter(
+      (hit) =>
+        !rawCandidates.some(
+          (c) => c.movieMinute === hit.movieMinute && Math.abs(c.shortStart - hit.shortStart) < 0.5,
+        ),
+    )
+    .map((hit) => {
+      const id = `winhit-${hit.movieMinute}-${hit.sceneId}`
+      const isAlreadyConfirmed = (scan.matches || []).some(
+        (m) =>
+          Math.abs(m.shortStart - hit.shortStart) < 0.5 &&
+          Math.abs(m.movieStart - hit.movieMinute * 60) < 60,
+      )
+      return {
+        id,
+        sceneId: hit.sceneId,
+        shortStart: hit.shortStart,
+        shortEnd: hit.shortEnd,
+        movieMinute: hit.movieMinute,
+        chunkIndex: hit.movieMinute,
+        movieStart: hit.movieMinute * 60,
+        movieEnd: hit.movieMinute * 60 + Math.max(1, hit.shortEnd - hit.shortStart),
+        model: `Window ${hit.windowIndex + 1} Hit (Movie Min ${hit.movieMinute})`,
+        status: isAlreadyConfirmed ? ('confirmed' as const) : ('pending' as const),
+      }
+    })
+
+  const allCandidates: MissingSceneCandidate[] = [...rawCandidates, ...windowHitCandidates]
+
   const toggleScene = (id: string) => {
     setSelectedSceneIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
@@ -445,30 +477,43 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
                   Instant Window Hits ({state.windowHits.length}):
                 </span>
                 <span className="text-[10px] text-muted-foreground">
-                  (Pipelined chunks scan automatically in background)
+                  (Click any hit below to preview side-by-side in the player)
                 </span>
               </div>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {state.windowHits.map((hit, i) => (
-                  <span
-                    key={i}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-success/30 bg-success/10 px-2 py-1 font-mono text-[11px] text-success"
-                  >
-                    <span>Movie Min {hit.movieMinute}</span>
-                    <span className="text-muted-foreground/80">({fmtTime(hit.shortStart)}–{fmtTime(hit.shortEnd)})</span>
-                  </span>
-                ))}
+                {state.windowHits.map((hit, i) => {
+                  const hitCandId = `winhit-${hit.movieMinute}-${hit.sceneId}`
+                  const isCurSelected = (selectedCandidateId || allCandidates[0]?.id) === hitCandId
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setSelectedCandidateId(hitCandId)}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[11px] transition-all cursor-pointer ${
+                        isCurSelected
+                          ? 'border-primary bg-primary text-primary-foreground font-semibold shadow-xs'
+                          : 'border-success/40 bg-success/10 text-success hover:bg-success/20'
+                      }`}
+                    >
+                      <Eye className="size-3" />
+                      <span>Movie Min {hit.movieMinute}</span>
+                      <span className={isCurSelected ? 'text-primary-foreground/80' : 'text-muted-foreground/80'}>
+                        ({fmtTime(hit.shortStart)}–{fmtTime(hit.shortEnd)})
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
             </div>
           )}
 
           {/* CANDIDATE SCENE MATCHES FOR USER MANUAL REVIEW WITH SIDE-BY-SIDE VIDEO PREVIEW */}
-          {state.candidates && state.candidates.length > 0 && (
+          {allCandidates && allCandidates.length > 0 && (
             <div className="mt-3 border-t border-border/60 pt-2.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-foreground">
                   <Sparkles className="mr-1 inline size-3.5 text-primary" aria-hidden />
-                  Candidate Scene Matches ({state.candidates.length}) — Side-by-Side Review:
+                  Candidate Scene Matches & Window Hits ({allCandidates.length}) — Side-by-Side Review:
                 </span>
                 <span className="text-[11px] text-muted-foreground">
                   (Watch synchronized video preview below, then click Accept or Reject)
@@ -478,8 +523,8 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
               {/* SIDE-BY-SIDE DUAL VIDEO PLAYER */}
               <CandidateSideBySide
                 scan={scan}
-                candidates={state.candidates}
-                selectedCandidateId={selectedCandidateId || state.candidates[0]?.id || null}
+                candidates={allCandidates}
+                selectedCandidateId={selectedCandidateId || allCandidates[0]?.id || null}
                 onSelectCandidate={(id) => setSelectedCandidateId(id)}
                 onAccept={(id) => handleReviewCandidate(id, 'accept')}
                 onReject={(id) => handleReviewCandidate(id, 'reject')}
@@ -489,13 +534,14 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
               {/* CANDIDATE LIST */}
               <div className="mt-3 space-y-2">
                 <div className="text-[11px] font-medium text-muted-foreground">
-                  All Candidates List (Click any candidate to preview in player above):
+                  All Candidates & Window Hits (Click any row to preview side-by-side in player above):
                 </div>
-                {state.candidates.map((cand, idx) => {
+                {allCandidates.map((cand, idx) => {
                   const isAccepted = cand.status === 'confirmed'
                   const isRejected = cand.status === 'rejected'
                   const isBusy = reviewingId === cand.id
-                  const isSelected = (selectedCandidateId || state.candidates?.[0]?.id) === cand.id
+                  const isSelected = (selectedCandidateId || allCandidates[0]?.id) === cand.id
+                  const isWindowHit = cand.id.startsWith('winhit-')
 
                   return (
                     <div
@@ -521,9 +567,15 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
                           <span className="font-mono font-medium text-foreground">
                             Movie {fmtTime(cand.movieStart)}–{fmtTime(cand.movieEnd)}
                           </span>
-                          <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                            Chunk {cand.chunkIndex + 1}
-                          </span>
+                          {isWindowHit ? (
+                            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                              ⚡ Window Hit (Min {cand.movieMinute})
+                            </span>
+                          ) : (
+                            <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                              Chunk {cand.chunkIndex + 1}
+                            </span>
+                          )}
                           {isSelected && (
                             <span className="flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
                               <Eye className="size-3" /> PREVIEWING
@@ -532,7 +584,7 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
                         </div>
                         {cand.model && (
                           <p className="text-[11px] text-muted-foreground">
-                            Model: <span className="font-mono">{cand.model}</span>
+                            Source: <span className="font-mono">{cand.model}</span>
                           </p>
                         )}
                       </div>
@@ -541,7 +593,7 @@ export function MissingScenePanel({ scan }: { scan: Scan }) {
                         {isAccepted ? (
                           <span className="flex items-center gap-1 rounded-md bg-success/20 px-2 py-1 text-xs font-medium text-success">
                             <Check className="size-3.5" aria-hidden />
-                            Accepted
+                            Accepted & Added
                           </span>
                         ) : isRejected ? (
                           <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
