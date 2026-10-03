@@ -2822,6 +2822,12 @@ class Scheduler {
       st.currentChunk = chunkIndex
       this.mark(job)
 
+      const segDuration = seg.end - seg.start
+      const movieChunkDuration = 60
+      const totalVideoDurationSec = segDuration + movieChunkDuration
+      const currentEmaRate = this.modelTokenRateEMA.get(m.id) ?? 260
+      let promptChars = CHUNK_MAP_PROMPT.length
+
       let chunkFileName: string | null = null
       /** consumed backup uploads (deleted in finally) */
       const backupNames: string[] = []
@@ -2919,11 +2925,7 @@ class Scheduler {
         }
 
         // Request-size guard: before calling mapChunkRequest, log estimated input tokens
-        const segDuration = seg.end - seg.start
-        const movieChunkDuration = 60
-        const totalVideoDurationSec = segDuration + movieChunkDuration
-        const promptChars = (effectivePrompt || CHUNK_MAP_PROMPT).length
-        const currentEmaRate = this.modelTokenRateEMA.get(m.id) ?? 260
+        promptChars = (effectivePrompt || CHUNK_MAP_PROMPT).length
         const estimatedTokens = Math.round(totalVideoDurationSec * currentEmaRate + promptChars / 4)
 
         if (estimatedTokens > 200_000) {
