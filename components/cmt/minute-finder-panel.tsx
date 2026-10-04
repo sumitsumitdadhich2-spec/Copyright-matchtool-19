@@ -8,6 +8,7 @@ import { fetcher, fmtTime, fmtBytes } from '@/lib/format'
 import { displayModelName } from '@/lib/models'
 import { MinuteFinderToggle } from './minute-finder-toggle'
 import { MissingScenePanel } from './missing-scene-panel'
+import { BatchVerifierPanel } from './batch-verifier-panel'
 
 interface FinderResponse {
   mode: MinuteFinderMode
@@ -432,6 +433,11 @@ export function MinuteFinderPanel({ scan, mode, onModeChanged }: { scan: Scan; m
             Short ke jo hisse (≥4 s) kisi window me nahi mile, unhe cut karke high-fps (5–24) backup clip banti hai aur har window me dobara dhundha jata hai — ek hi baar.
             Jo minutes milte hain unpar 24 fps chunk-time scan apne aap start ho jata hai — koi approval nahi.
           </p>
+
+          {/* 1-Minute 24 FPS Batch Verifier Section (Dedicated user-friendly section right above Missing Finding Scene) */}
+          <div className="mt-4 pt-4 border-t border-border/80">
+            <BatchVerifierPanel scan={scan} />
+          </div>
 
           <MissingScenePanel scan={scan} />
         </>

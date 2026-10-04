@@ -187,24 +187,29 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
   }
 
   return (
-    <section className="rounded-lg border border-border/80 bg-card/60 p-4 shadow-sm backdrop-blur-sm">
+    <section
+      id="batch-verifier-section"
+      className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-card/95 via-card/75 to-emerald-950/20 p-4 sm:p-5 shadow-md backdrop-blur-md transition-all"
+      aria-labelledby="batch-verifier-title"
+    >
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shadow-xs">
             <ShieldCheck className="h-5 w-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h3 className="font-semibold text-foreground text-sm sm:text-base">
-                Batch Minute Verifier
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 id="batch-verifier-title" className="font-bold text-foreground text-sm sm:text-base tracking-tight">
+                1-Minute 24 FPS Batch Verifier
               </h3>
-              <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-mono font-medium text-emerald-300">
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300 border border-emerald-500/30">
+                <Zap className="h-2.5 w-2.5 fill-current" />
                 24 FPS ALL-IN-ONE
               </span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Merges matched scenes per 1-minute window at 24 fps and verifies via Gemini 3.6 / 3.7 / 3.8.
+            <p className="text-xs text-muted-foreground mt-0.5">
+              1-1 Minute ke matched scenes ko 24 FPS me merge karke Gemini se negative copyright visual verification karta hai.
             </p>
           </div>
         </div>
@@ -215,7 +220,7 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
             <button
               type="button"
               onClick={handleStop}
-              className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-all cursor-pointer shadow-xs"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
               Stop
@@ -225,7 +230,7 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
             type="button"
             onClick={handleVerifyAll}
             disabled={triggeringAll}
-            className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 transition-all cursor-pointer"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 px-4 py-2 text-xs font-bold text-white shadow-md hover:from-emerald-500 hover:to-teal-400 disabled:opacity-50 transition-all cursor-pointer hover:shadow-emerald-500/20 active:scale-98"
           >
             {triggeringAll ? (
               <>
@@ -239,13 +244,24 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
               </>
             ) : (
               <>
-                <Zap className="h-3.5 w-3.5" />
+                <Zap className="h-3.5 w-3.5 fill-current" />
                 Verify All Minute Batches
               </>
             )}
           </button>
         </div>
       </div>
+
+      {/* Live Running Progress Banner */}
+      {isRunning && (
+        <div className="mt-3 flex items-center gap-2.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-xs text-emerald-300">
+          <Loader2 className="h-4 w-4 animate-spin text-emerald-400 shrink-0" />
+          <div className="flex-1">
+            <span className="font-semibold text-emerald-200">Batch Verification In Progress: </span>
+            <span>{batchState?.progress || 'Processing 1-minute blocks sequentially at 24 FPS...'}</span>
+          </div>
+        </div>
+      )}
 
       {/* Feedback Banner */}
       {feedback && (
