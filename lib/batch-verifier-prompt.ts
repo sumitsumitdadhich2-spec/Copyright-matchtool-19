@@ -9,34 +9,55 @@ export function fmtMs(sec: number): string {
 
 export function buildBatchVerifierPrompt(parts: BatchVerifyPart[]): string {
   const partLines = parts
-    .map(
-      (p) =>
-        `PART ${p.partIndex}: Stitched Local [${fmtMs(p.localStart)} - ${fmtMs(p.localEnd)}] | Short Original [${fmtMs(p.shortStart)} - ${fmtMs(p.shortEnd)}] <==> Movie Original [${fmtMs(p.movieStart)} - ${fmtMs(p.movieEnd)}] (Duration: ${p.duration.toFixed(3)}s)`,
-    )
-    .join('\n')
+    .map((p) => {
+      const startFrame = Math.round(p.localStart * 24)
+      const endFrame = Math.round(p.localEnd * 24)
+      const frameCount = Math.max(1, endFrame - startFrame)
+      return `PART ${p.partIndex} (Duration: ${p.duration.toFixed(3)}s | ${frameCount} frames @ 24 FPS):
+  * Video 1 (Stitched Short): [${fmtMs(p.localStart)} - ${fmtMs(p.localEnd)}] (Frames ${startFrame} to ${endFrame})
+  * Video 2 (Stitched Movie): [${fmtMs(p.localStart)} - ${fmtMs(p.localEnd)}] (Frames ${startFrame} to ${endFrame})
+  * Reference Context: Original Short was ~${fmtMs(p.shortStart)}, Original Movie was ~${fmtMs(p.movieStart)}`
+    })
+    .join('\n\n')
 
-  return `You are an ULTRA-STRICT, ADVERSARIAL FORENSIC VIDEO AUDITOR.
+  return `You are a PROFESSIONAL DIGITAL COPYRIGHT & FORENSIC VISUAL MATCH VERIFICATION TOOL.
+Your methodology is NEGATIVE COPYRIGHT MATCHING (Discrepancy, Piracy & Mismatch Hunter).
 Tumhara ek hi mandate hai: FALSE POSITIVES KO ZERO KARNA. ZABARDASTI CONFIRM KARNA STRICTLY FORBIDDEN HAI.
 
-Tumhare paas 24 FPS par synchronize kiye gaye DO stitched video streams hain:
-- Video 1: Stitched SHORT VIDEO / REEL clips (Vertical 9:16 format, exactly 24 FPS CFR). Missing unmapped gaps short video se hata kar sirf matched scenes stitch kiye gaye hain.
-- Video 2: Stitched CANDIDATE ORIGINAL MOVIE clips (Widescreen 16:9 format, exactly 24 FPS CFR).
+=============================================================================
+🔇 CRITICAL RULE — 100% VISUAL ONLY (IGNORE ALL AUDIO / VOICE / DIALOGUE / MUSIC):
+=============================================================================
+1. COMPLETELY IGNORE ALL AUDIO, SPEECH, VOICE, DIALOGUE, SOUND EFFECTS, AND MUSIC!
+2. In social media shorts/reels, creators regularly replace audio with royalty-free music, commentary, voiceovers, dubbing, or pitch-shifted sound.
+3. DO NOT USE AUDIO OR SPEECH TO JUDGE MATCHES!
+4. Base 100% of your evaluation STRICTLY AND EXCLUSIVELY on the 24 FPS VISUAL FRAMES:
+   - Facial features, expressions, eye gaze, lip shape
+   - Actor body postures, arm/hand gestures, finger movements
+   - Camera angle, perspective, motion trajectory
+   - Props, background objects, room layout, lighting
 
-Dono videos ek hi local timeline par frame-accurate 24 FPS par aligned hain.
-Video 1 (9:16) Video 2 (16:9) ka spatial crop hai (Left, Center, ya Right crop).
+=============================================================================
+DUAL 24 FPS SYNCHRONIZED VIDEO STREAMS:
+=============================================================================
+- Video 1: Stitched SHORT REEL (Vertical 9:16 format, exactly 24 FPS CFR). All non-matched gaps were removed.
+- Video 2: Stitched CANDIDATE ORIGINAL MOVIE (Widescreen 16:9 format, exactly 24 FPS CFR). All non-matched gaps were removed.
 
-=========================================
-TIMELINE PART MAP (${parts.length} PAIRED SEGMENTS TO AUDIT):
-=========================================
+IMPORTANT: Both videos are sample-locked and frame-accurate at exactly 24 FPS.
+For every PART listed below, Video 1 and Video 2 share the EXACT SAME LOCAL TIMESTAMPS [localStart – localEnd] and frame numbers!
+DO NOT look for original movie timestamps (e.g. 16:00) in the video files; look at the STITCHED LOCAL TIMESTAMPS indicated for each PART!
+Video 1 (9:16) is a spatial crop (Left, Center, or Right) of Video 2's widescreen (16:9).
+
+=============================================================================
+TIMELINE VERIFICATION SHEET (${parts.length} PAIRED 24 FPS SEGMENTS TO AUDIT):
+=============================================================================
 ${partLines}
 
-=========================================
-🚨 REVERSE TECHNIQUE & STRICT FORENSIC RULES:
-=========================================
+=============================================================================
+🚨 NEGATIVE COPYRIGHT MATCHING & REVERSE FORENSIC RULES:
+=============================================================================
 Tumhe "Match" dhoondhne ki koshish NAHI karni. Tumhe "FARK / DISCREPANCY" dhoondhna hai ki KAHAN PAR SCENE MATCH NAHI HO RAHA HAI!
-DEFAULT ASSUMPTION: Har candidate segment GALAT hai jab tak ki har single frame par exact 1:1 micro-action prove na ho jaye.
+DEFAULT ASSUMPTION: Har candidate segment GALAT hai jab tak ki har single frame par exact 1:1 visual proof na mil jaye.
 
-STRICT RULES:
 1. REVERSE AUDIT PRINCIPLE (Mismatch Hunter):
    - Tumhara kaam ye pata lagana hai ki Video 1 aur Video 2 me KYA FARK HAI.
    - Agar tumne koi bhi fark pakda (chahe 0.2 second ka offset ho, ya actor ka haath alag ho), to wo segment TURANT REJECT hoga.
@@ -47,7 +68,6 @@ STRICT RULES:
    - Agar candidate us scene ke 5, 10 ya 30 second aage/pichhe ka hai to wo 100% REJECT hai.
    - Example Mismatch (REJECT): Video 1 me character right hand se cup utha raha hai; Video 2 me cup pehle se haath me hai ya left hand se utha raha hai -> REJECT!
    - Example Mismatch (REJECT): Video 1 me character left mud raha hai; Video 2 me stationary khada hai -> REJECT!
-   - Example Mismatch (REJECT): Video 1 me dialogue shuru ho raha hai; Video 2 me dialogue bol chuka hai -> REJECT!
 
 3. 1:1 SUB-SECOND MICRO-ACTION PRECISION (24 FPS):
    - Har 1/24 second frame par:
@@ -57,13 +77,9 @@ STRICT RULES:
      * Props ka status (phone, glass, gun, knife, cigarette, etc.).
    - Agar koi bhi micro-action Video 1 aur Video 2 me alag hai to wo different moment hai -> REJECT!
 
-4. 1% DOUBT = INSTANT REJECT:
-   - Rescan system rejected scene ka naya scan run karke sahi timestamp dhoondh lega.
-   - Lekin ek galat scene ko "CONFIRMED" kehna poore export video ko barbad kar deta hai.
-   - Isliye agar 1% bhi shak ya blurriness ya timing shift lage to REJECT karo.
-
-5. AUDIO & DIALOGUE VERIFICATION:
-   - Video 1 (Short) me narration ya background music ho sakta hai, lekin agar characters bol rahe hain to unke hontho ki movement (lip movement) aur reaction Video 2 ke original scene se 100% sync hone chahiye.
+4. 85% CONFIDENCE THRESHOLD:
+   - CONFIRMED requires: Match Percentage >= 85% and ZERO visual discrepancy.
+   - Match Percentage < 85% is strictly REJECTED.
 
 Respond in Hinglish (Hindi written in Latin script) with structured forensic analysis followed by JSON verdicts.
 
@@ -80,9 +96,9 @@ PART <n> [mm:ss.mmm - mm:ss.mmm]:
 =====================
 HISSA 2 — FINAL STRICT VERDICTS & JSON
 =====================
-HISSA 1 ke findings ke mutabiq har PART ka STRICT verdict do:
-- Agar HISSA 1 me koi bhi FARK ya timing offset mila -> STRICTLY "REJECTED" (rescanRequired: true).
-- "CONFIRMED" sirf aur sirf tab do jab ZERO FARK mila ho aur visual proof 100% indisputable ho.
+HISSA 1 ke findings ke mutabiq har PART ka STRICT verdict aur match percentage do:
+- Agar Match Percentage >= 85% aur zero mismatch mila -> "CONFIRMED".
+- Agar Match Percentage < 85% ya koi bhi fark mila -> "REJECTED".
 
 Har part ka structured verdict JSON format me provide karo:
 
@@ -93,20 +109,22 @@ Har part ka structured verdict JSON format me provide karo:
       "partIndex": 1,
       "verdict": "CONFIRMED",
       "confidence": 0.98,
+      "matchPercentage": 98,
       "mismatchDetail": "None - exact frame-accurate micro-motion match",
       "cropPosition": "Center 9:16 crop",
       "visualAnchorProof": "At +0.4s character lifts chopsticks with right hand and raises sushi piece toward mouth in exact sync",
-      "reason": "Indisputable frame-accurate visual match. All micro-actions, postures, and prop movements align 1:1.",
+      "reason": "Indisputable frame-accurate visual match (98% match). All micro-actions, postures, and prop movements align 1:1.",
       "rescanRequired": false
     },
     {
       "partIndex": 2,
       "verdict": "REJECTED",
-      "confidence": 0.10,
+      "confidence": 0.35,
+      "matchPercentage": 35,
       "mismatchDetail": "At 00:06.2 Video 1 actor turns head left, but Video 2 candidate shows character looking straight",
       "cropPosition": "Center crop",
       "visualAnchorProof": "Video 1 character is walking forward; Video 2 candidate shows character standing stationary behind table",
-      "reason": "Temporal mismatch trap: candidate is from the same scene but ~12s earlier. Motion and posture do not align.",
+      "reason": "Temporal mismatch trap (35% match): candidate is from the same scene but ~12s earlier. Motion and posture do not align.",
       "rescanRequired": true
     }
   ]

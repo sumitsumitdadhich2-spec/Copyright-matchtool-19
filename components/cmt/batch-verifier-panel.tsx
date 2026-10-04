@@ -17,6 +17,7 @@ import {
 import type { Scan, BatchVerifyPart } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 import { displayModelName } from '@/lib/models'
+import { sameShortSegment } from '@/lib/candidate-pick'
 
 export function BatchVerifierPanel({ scan }: { scan: Scan }) {
   const { mutate } = useSWRConfig()
@@ -73,7 +74,7 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
   })
 
   async function handleVerifyAll() {
-    if (triggeringAll || isRunning) return
+    if (triggeringAll) return
     setTriggeringAll(true)
     setFeedback(null)
     try {
@@ -210,33 +211,39 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
 
         {/* Global Controls */}
         <div className="flex items-center gap-2">
-          {isRunning ? (
+          {isRunning && (
             <button
+              type="button"
               onClick={handleStop}
-              className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors cursor-pointer"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
               Stop
             </button>
-          ) : (
-            <button
-              onClick={handleVerifyAll}
-              disabled={triggeringAll}
-              className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 transition-all cursor-pointer"
-            >
-              {triggeringAll ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Starting...
-                </>
-              ) : (
-                <>
-                  <Zap className="h-3.5 w-3.5" />
-                  Verify All Minute Batches
-                </>
-              )}
-            </button>
           )}
+          <button
+            type="button"
+            onClick={handleVerifyAll}
+            disabled={triggeringAll}
+            className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 transition-all cursor-pointer"
+          >
+            {triggeringAll ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Starting...
+              </>
+            ) : isRunning ? (
+              <>
+                <RotateCcw className="h-3.5 w-3.5" />
+                Restart All Minutes
+              </>
+            ) : (
+              <>
+                <Zap className="h-3.5 w-3.5" />
+                Verify All Minute Batches
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -385,53 +392,64 @@ export function BatchVerifierPanel({ scan }: { scan: Scan }) {
                         const isRejected = p.verdict === 'REJECTED'
                         const partKey = minIdx * 1000 + pIdx
 
+                        const rawConfidence = p.confidence !== undefined ? p.confidence : (isConfirmed ? 0.95 : 0.25)
+                        const matchPercent = Math.round(rawConfidence > 1 ? rawConfidence : rawConfidence * 100)
+                        const isHighMatch = matchPercent >= 85
+
+                        // Find corresponding Scene # in Compare panel pairs
+                        const sceneIdx = (scan.candidateGroups || []).findIndex((g) =>
+                          (g.shortStart !== undefined && g.shortEnd !== undefined && sameShortSegment(g.shortStart, g.shortEnd, p.shortStart, p.shortEnd)) ||
+                          Math.abs(g.shortStart - p.shortStart) < 0.35 ||
+                          (g.shortStart <= p.shortStart + 0.1 && g.shortEnd >= p.shortStart - 0.1),
+                        )
+                        const displaySceneNum = sceneIdx !== -1 ? sceneIdx + 1 : (p.matchIndex !== undefined ? p.matchIndex + 1 : p.partIndex)
+
                         return (
                           <div
                             key={p.partIndex}
-                            className={`flex flex-col gap-1.5 rounded-md border p-2.5 text-xs transition-colors ${
-                              isConfirmed
-                                ? 'border-emerald-500/30 bg-emerald-500/5'
-                                : isRejected
-                                ? 'border-rose-500/30 bg-rose-500/5'
-                                : 'border-border/60 bg-background/50'
+                            className={`flex flex-col gap-2 rounded-lg border p-3 text-xs transition-all ${
+                              isHighMatch
+                                ? 'border-emerald-500/40 bg-emerald-500/10 text-foreground'
+                                : 'border-rose-500/40 bg-rose-500/10 text-foreground'
                             }`}
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono font-semibold text-foreground text-[11px]">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono font-bold text-foreground text-xs">
                                   PART {p.partIndex}
                                 </span>
-                                <span className="font-mono text-muted-foreground text-[11px]">
-                                  Short [{fmtTime(p.shortStart)} – {fmtTime(p.shortEnd)}] <span className="text-foreground/60">⟷</span> Movie [{fmtTime(p.movieStart)} – {fmtTime(p.movieEnd)}]
+
+                                {/* Match percentage badge: Green if >= 85%, Red if < 85% */}
+                                <span
+                                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-mono text-[11px] font-bold border shadow-xs ${
+                                    isHighMatch
+                                      ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50'
+                                      : 'bg-rose-500/25 text-rose-300 border-rose-500/50'
+                                  }`}
+                                >
+                                  {isHighMatch ? (
+                                    <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                                  ) : (
+                                    <AlertCircle className="h-3 w-3 text-rose-400" />
+                                  )}
+                                  {matchPercent}% Match ({isHighMatch ? 'CONFIRMED' : 'REJECTED'})
                                 </span>
-                                <span className="text-[10px] text-muted-foreground">
-                                  ({p.duration.toFixed(2)}s)
+
+                                <span className="font-mono text-muted-foreground text-[11px]">
+                                  Stitched [{fmtTime(p.localStart)} – {fmtTime(p.localEnd)}] ({p.duration.toFixed(2)}s @ 24fps)
                                 </span>
                               </div>
 
                               <div className="flex items-center gap-2">
-                                {isConfirmed && (
-                                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-500/30">
-                                    <CheckCircle2 className="h-3 w-3" />
-                                    CONFIRMED
-                                  </span>
-                                )}
-                                {isRejected && (
-                                  <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-2 py-0.5 text-[10px] font-medium text-rose-400 border border-rose-500/30">
-                                    <AlertCircle className="h-3 w-3" />
-                                    REJECTED
-                                  </span>
-                                )}
-
-                                {/* View button to jump directly to Side-by-Side Comparison */}
+                                {/* Interactive button jumping directly to this scene in Side-by-Side Comparison */}
                                 <button
                                   type="button"
                                   onClick={() => jumpToCompare(p.shortStart, p.shortEnd)}
-                                  className="inline-flex items-center gap-1 rounded bg-secondary hover:bg-secondary/80 border border-border/80 px-2 py-0.5 text-[10px] font-medium text-foreground transition-colors cursor-pointer shadow-xs hover:border-primary/50"
-                                  title={`View Short [${fmtTime(p.shortStart)}–${fmtTime(p.shortEnd)}] in Side-by-Side Comparison`}
+                                  className="inline-flex items-center gap-1.5 rounded-md bg-primary/10 hover:bg-primary/20 border border-primary/30 px-2.5 py-1 text-[11px] font-semibold text-primary transition-all cursor-pointer shadow-xs hover:border-primary/60"
+                                  title={`Jump directly to Scene #${displaySceneNum} in Side-by-Side Comparison`}
                                 >
-                                  <Eye className="h-3 w-3 text-primary" />
-                                  View
+                                  <Eye className="h-3.5 w-3.5" />
+                                  <span>Scene #{displaySceneNum} in Side-by-Side</span>
                                 </button>
 
                                 {isRejected && (

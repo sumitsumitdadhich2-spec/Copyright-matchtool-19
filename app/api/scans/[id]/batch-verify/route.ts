@@ -54,7 +54,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ ok: true, message: `Verification started for minute ${body.minuteIndex + 1}` })
   }
 
-  // Default: start all minutes
+  // Default: start all minutes (cleans up any stale token/run first)
+  stopBatchVerification(id)
   void startBatchVerificationAll(id).catch((err) => {
     console.error(`[Batch Verifier] Error starting all-in-one verification:`, err)
   })

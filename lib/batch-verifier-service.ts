@@ -18,7 +18,7 @@ import { CancelToken } from './ffmpeg-pool'
 import { sameShortSegment } from './candidate-pick'
 import type { Scan, BatchMinuteResult, BatchVerifyPart, BatchVerifyState, ChunkMatch } from './types'
 
-const BATCH_VERIFY_MODELS = ['gemini-3.7-flash', 'gemini-3.8-flash', 'gemini-3.6-flash']
+const BATCH_VERIFY_MODELS = ['gemini-3.7-flash', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash']
 
 // In-memory registry of cancel tokens per scan
 const activeCancelTokens = new Map<string, CancelToken>()
@@ -73,7 +73,13 @@ export function parseBatchVerifierResponse(
         const idx = Number(item.partIndex || item.part || item.index)
         if (partsMap.has(idx)) {
           const rawVerdict = String(item.verdict || '').toUpperCase().trim()
-          const confidence = typeof item.confidence === 'number' ? item.confidence : 0.9
+          let confidence = 0.9
+          if (typeof item.matchPercentage === 'number') {
+            confidence = item.matchPercentage > 1 ? item.matchPercentage / 100 : item.matchPercentage
+          } else if (typeof item.confidence === 'number') {
+            confidence = item.confidence > 1 ? item.confidence / 100 : item.confidence
+          }
+
           // Strict confidence threshold: must be explicitly confirmed, no rejection/mismatch indicators, confidence >= 0.85
           const isConfirmed =
             (rawVerdict === 'CONFIRMED' || rawVerdict === 'SAME' || rawVerdict === 'MATCH' || rawVerdict === 'CONFIRM') &&
@@ -160,6 +166,20 @@ async function getBatchCandidateLanes(scan: Scan): Promise<CandidateLane[]> {
     }
   })
 
+  // Fallback: if all lanes are marked exhausted, include all models to guarantee execution
+  if (lanes.length === 0) {
+    allKeys.forEach((apiKey, keyIdx) => {
+      for (const modelId of BATCH_VERIFY_MODELS) {
+        lanes.push({
+          apiKey,
+          keyIdx: keyIdx + 1,
+          modelId,
+          rpd: 20,
+        })
+      }
+    })
+  }
+
   return lanes
 }
 
@@ -171,7 +191,7 @@ export async function verifySingleMinute(
   minuteIndex: number,
   token?: CancelToken,
 ): Promise<BatchMinuteResult> {
-  const scan = getScan(scanId)
+  const scan = (getScan(scanId) || await getFreshScan(scanId))
   if (!scan) throw new Error(`Scan ${scanId} not found`)
 
   const state = getOrCreateBatchVerifyState(scan)
@@ -661,12 +681,12 @@ export async function verifySingleMinute(
  */
 export async function startBatchVerificationAll(scanId: string): Promise<void> {
   const existingToken = activeCancelTokens.get(scanId)
-  if (existingToken && !existingToken.isCancelled()) {
-    logScan(scanId, 'info', `[Batch Verifier] Verification is already running for this scan.`)
-    return
+  if (existingToken) {
+    existingToken.cancel()
+    activeCancelTokens.delete(scanId)
   }
 
-  const scan = getScan(scanId)
+  const scan = (await getFreshScan(scanId)) || getScan(scanId)
   if (!scan) throw new Error(`Scan ${scanId} not found`)
 
   const totalDuration = scan.shortDuration || 60
@@ -679,16 +699,25 @@ export async function startBatchVerificationAll(scanId: string): Promise<void> {
   state.status = 'running'
   state.startedAt = Date.now()
   state.finishedAt = null
-  state.progress = `Starting verification across ${minuteCount} minute(s)...`
+  state.progress = `Starting 24 FPS verification across ${minuteCount} minute(s)...`
   saveScan(scan)
 
-  logScan(scanId, 'info', `[Batch Verifier] Starting parallel 24 FPS verification for ${minuteCount} minute(s) across available API keys & models...`)
+  logScan(
+    scanId,
+    'info',
+    `[Batch Verifier] Starting 24 FPS verification for ${minuteCount} minute(s) in sequence...`,
+  )
 
-  // Process minutes in parallel across coordinator lanes (different API keys & models)
+  // Process minutes sequentially for 100% stability, zero FFmpeg memory contention, and instant progressive updates
   void (async () => {
     try {
-      const minutePromises = Array.from({ length: minuteCount }, (_, minIdx) => minIdx).map(async (minIdx) => {
-        if (token.isCancelled()) return
+      for (let minIdx = 0; minIdx < minuteCount; minIdx++) {
+        if (token.isCancelled()) break
+        const currentScan = (await getFreshScan(scanId)) || getScan(scanId)
+        if (currentScan && currentScan.batchVerify) {
+          currentScan.batchVerify.progress = `Verifying Minute ${minIdx + 1} of ${minuteCount}...`
+          saveScan(currentScan)
+        }
         try {
           await verifySingleMinute(scanId, minIdx, token)
         } catch (err) {
@@ -702,15 +731,16 @@ export async function startBatchVerificationAll(scanId: string): Promise<void> {
             )
           }
         }
-      })
-
-      await Promise.allSettled(minutePromises)
+      }
     } finally {
       activeCancelTokens.delete(scanId)
-      const latestScan = getScan(scanId)
+      const latestScan = (await getFreshScan(scanId)) || getScan(scanId)
       if (latestScan && latestScan.batchVerify) {
         latestScan.batchVerify.status = token.isCancelled() ? 'stopped' : 'done'
         latestScan.batchVerify.finishedAt = Date.now()
+        latestScan.batchVerify.progress = token.isCancelled()
+          ? 'Batch verification stopped.'
+          : `All ${minuteCount} minute(s) verification completed.`
         saveScan(latestScan)
         logScan(scanId, 'success', `[Batch Verifier] All ${minuteCount} minute(s) verification completed.`)
       }
